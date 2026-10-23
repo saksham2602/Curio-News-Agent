@@ -62,7 +62,17 @@ export async function currentUser(): Promise<CurrentUser | null> {
   }
   const gid = await guestId();
   if (!gid) return null;
-  const u = await db.user.upsert({ where: { id: gid }, update: {}, create: { id: gid, isGuest: true } });
+  let u = await db.user.findUnique({ where: { id: gid } });
+  if (!u) {
+    // Several server components may create the same new guest concurrently; tolerate the race.
+    try {
+      u = await db.user.create({ data: { id: gid, isGuest: true } });
+    } catch (e) {
+      if ((e as { code?: string }).code !== "P2002") throw e;
+      u = await db.user.findUnique({ where: { id: gid } });
+      if (!u) return null;
+    }
+  }
   return toCurrent(u);
 }
 
