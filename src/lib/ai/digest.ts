@@ -120,8 +120,11 @@ Write "The Week, Decoded": identify the common themes behind the stories, then t
   }
 }
 
+let digestBuilding: Promise<unknown> | null = null;
+
 // Regenerates the rolling 7-day digest if missing or older than 12 hours (or compiled while AI is now available).
-export async function ensureWeeklyDigest(force = false) {
+// With `background: true` (page requests) the current edition is returned at once and the rebuild runs behind the scenes.
+export async function ensureWeeklyDigest(force = false, background = false) {
   const now = new Date();
   const weekKey = isoWeekKey(now);
   const existing = await db.weeklyDigest.findUnique({ where: { weekKey } });
@@ -129,10 +132,29 @@ export async function ensureWeeklyDigest(force = false) {
   if (!force && !stale) return existing;
   const count = await db.story.count();
   if (count === 0) return existing;
-  const content = await buildWeeklyDigest(now);
-  return db.weeklyDigest.upsert({
-    where: { weekKey },
-    update: { startAt: new Date(now.getTime() - 7 * 86_400_000), endAt: now, contentJson: JSON.stringify(content), kind: content.kind, createdAt: now },
-    create: { weekKey, startAt: new Date(now.getTime() - 7 * 86_400_000), endAt: now, contentJson: JSON.stringify(content), kind: content.kind },
-  });
+  const build = async () => {
+    const content = await buildWeeklyDigest(now);
+    return db.weeklyDigest.upsert({
+      where: { weekKey },
+      update: { startAt: new Date(now.getTime() - 7 * 86_400_000), endAt: now, contentJson: JSON.stringify(content), kind: content.kind, createdAt: now },
+      create: { weekKey, startAt: new Date(now.getTime() - 7 * 86_400_000), endAt: now, contentJson: JSON.stringify(content), kind: content.kind },
+    });
+  };
+  if (background) {
+    if (!digestBuilding) {
+      digestBuilding = build()
+        .catch((e) => console.error("[digest] background build failed:", e instanceof Error ? e.message : e))
+        .finally(() => {
+          digestBuilding = null;
+        });
+    }
+    // Serve a quick compiled edition immediately if none exists yet.
+    if (!existing) {
+      const latest = await db.weeklyDigest.findFirst({ orderBy: { endAt: "desc" } });
+      return latest;
+    }
+    return existing;
+  }
+  if (digestBuilding) await digestBuilding;
+  return build();
 }

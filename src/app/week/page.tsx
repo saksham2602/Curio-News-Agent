@@ -10,11 +10,11 @@ export const metadata: Metadata = { title: "The Week, Decoded" };
 export const dynamic = "force-dynamic";
 
 export default async function WeekPage() {
-  const digest = await ensureWeeklyDigest();
+  const digest = await ensureWeeklyDigest(false, true);
   if (!digest) {
     return (
       <Container className="pt-16">
-        <EmptyState doodle={<CalendarDoodle className="h-14 w-14">7</CalendarDoodle>} title="The week is still being written" description="The weekly synthesis appears once stories have been ingested." />
+        <EmptyState doodle={<CalendarDoodle className="h-14 w-14">7</CalendarDoodle>} title="The week is being written" description="The first weekly synthesis is generated in the background after the news is ingested. Check back in a couple of minutes." />
       </Container>
     );
   }
