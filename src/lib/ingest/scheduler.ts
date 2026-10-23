@@ -2,6 +2,7 @@ import { runIngestion, pruneOld } from "./pipeline";
 import { refreshIndicators } from "../econ/indicators";
 import { ensureWeeklyDigest } from "../ai/digest";
 import { db, getSetting } from "../db";
+import { clearCache } from "../cache";
 
 // In-process scheduler. Runs in `next dev` / `next start` (long-lived Node process).
 // On serverless hosts set IN_PROCESS_SCHEDULER=false and call /api/cron/refresh from an external cron.
@@ -34,25 +35,28 @@ export function startScheduler() {
   setInterval(safe("breaking", () => runIngestion({ cadence: "breaking" })), breaking * 60_000).unref();
   setInterval(safe("general", () => runIngestion({ cadence: "general" })), general * 60_000).unref();
   setInterval(safe("analysis", () => runIngestion({ cadence: "analysis" })), analysis * 60_000).unref();
-  setInterval(safe("econ", () => refreshIndicators()), econ * 60_000).unref();
+  setInterval(safe("econ", async () => { await refreshIndicators(); clearCache(); }), econ * 60_000).unref();
   setInterval(safe("digest", () => ensureWeeklyDigest()), 6 * 3_600_000).unref();
   setInterval(safe("prune", () => pruneOld()), 24 * 3_600_000).unref();
 
   // Boot: refresh if the data is empty or stale.
   void (async () => {
     try {
+      // Jobs left "running" by a previous process (restart mid-refresh) are marked interrupted.
+      await db.jobRun.updateMany({ where: { status: "running", startedAt: { lt: new Date(Date.now() - 20 * 60_000) } }, data: { status: "error", finishedAt: new Date(), details: "Interrupted by a server restart" } }).catch(() => null);
+      const ind = await db.indicator.count();
+      const lastEcon = await getSetting("lastEconRefreshAt");
+      if (ind === 0 || !lastEcon || Date.now() - new Date(lastEcon).getTime() > econ * 60_000) {
+        await refreshIndicators();
+        clearCache();
+      }
       const last = await getSetting("lastRefreshAt");
       const count = await db.story.count();
       const stale = !last || Date.now() - new Date(last).getTime() > general * 60_000;
       if (count === 0 || stale) {
         console.log("[scheduler] initial refresh starting…");
-        await runIngestion({ cadence: "all" });
-        console.log("[scheduler] initial refresh done");
-      }
-      const ind = await db.indicator.count();
-      const lastEcon = await getSetting("lastEconRefreshAt");
-      if (ind === 0 || !lastEcon || Date.now() - new Date(lastEcon).getTime() > econ * 60_000) {
-        await refreshIndicators();
+        const r = await runIngestion({ cadence: "all" });
+        console.log("[scheduler] initial refresh done in " + Math.round(r.durationMs / 1000) + "s: +" + r.newArticles + " articles, +" + r.newStories + " stories, " + r.errors.length + " errors");
       }
       await ensureWeeklyDigest();
     } catch (e) {

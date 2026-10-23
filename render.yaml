@@ -5,6 +5,7 @@ services:
     name: curious-brief
     runtime: node
     plan: free
+    region: singapore   # closest Render region to Supabase ap-south-1 (Mumbai)
     buildCommand: npm ci && npm run build
     startCommand: npm run start
     healthCheckPath: /api/status

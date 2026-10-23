@@ -1,4 +1,6 @@
 import Parser from "rss-parser";
+import { randomUUID } from "node:crypto";
+import type { Prisma } from "@prisma/client";
 import { db, setSetting } from "../db";
 import { SOURCES, type SourceDef } from "../sources";
 import { classifySubject, classifyRegion, looksLikeOpinion } from "./classify";
@@ -9,6 +11,9 @@ import { slugify, stripHtml, truncate, wordCount, readingMinutes, safeJson } fro
 import type { Subject, Region } from "../types";
 import { enrichQuickReads } from "../ai/quickread";
 import { isAiConfigured } from "../ai/client";
+import { clearCache, pMap, chunk } from "../cache";
+
+// Pipeline designed for a remote Postgres: few bulk writes, parallel updates, no per-row lookups.
 
 type Cadence = "breaking" | "general" | "analysis" | "all";
 
@@ -44,7 +49,7 @@ function pickImage(item: Record<string, unknown>): string | null {
   const fromMedia = (arr: unknown): string | null => {
     if (!Array.isArray(arr)) return null;
     for (const m of arr) {
-      const url = (m as { $?: { url?: string; medium?: string; type?: string } })?.$?.url;
+      const url = (m as { $?: { url?: string } })?.$?.url;
       const medium = (m as { $?: { medium?: string; type?: string } })?.$?.medium ?? (m as { $?: { type?: string } })?.$?.type ?? "";
       if (url && /^https?:/.test(url) && !/video|audio/.test(medium) && !/\.(mp4|mp3|m4a)(\?|$)/i.test(url)) return url;
     }
@@ -66,13 +71,16 @@ function pickImage(item: Record<string, unknown>): string | null {
 async function fetchFeed(src: SourceDef): Promise<FeedItem[]> {
   const feed = await parser.parseURL(src.feedUrl);
   const items: FeedItem[] = [];
+  const seen = new Set<string>();
   const cutoff = Date.now() - 7 * 86_400_000;
   for (const raw of feed.items ?? []) {
     const item = raw as unknown as Record<string, unknown> & Parser.Item;
     const url = (item.link ?? "").toString().trim();
     const title = stripHtml((item.title ?? "").toString()).trim();
     if (!url || !title || !/^https?:/.test(url)) continue;
-    const guid = ((item.guid as string | undefined) ?? url).toString().trim();
+    const guid = ((item.guid as string | undefined) ?? url).toString().trim().slice(0, 400);
+    if (seen.has(guid)) continue;
+    seen.add(guid);
     const pub = item.isoDate ? new Date(item.isoDate) : item.pubDate ? new Date(item.pubDate) : new Date();
     const publishedAt = Number.isNaN(pub.getTime()) ? new Date() : pub;
     if (publishedAt.getTime() < cutoff) continue;
@@ -80,7 +88,7 @@ async function fetchFeed(src: SourceDef): Promise<FeedItem[]> {
     const description = truncate(stripHtml((item.contentSnippet ?? item.summary ?? item.description ?? "") as string), 1200);
     const content = truncate(stripHtml((item.contentEncoded ?? item.content ?? "") as string), 4000);
     items.push({
-      guid: guid.slice(0, 400),
+      guid,
       url: url.slice(0, 1000),
       title: title.slice(0, 300),
       description: description || content.slice(0, 600),
@@ -94,24 +102,11 @@ async function fetchFeed(src: SourceDef): Promise<FeedItem[]> {
 }
 
 async function ensureSources() {
-  for (const s of SOURCES) {
-    await db.source.upsert({
-      where: { id: s.id },
-      update: { name: s.name, homepage: s.homepage, feedUrl: s.feedUrl, region: s.region, kind: s.kind, credibility: s.credibility, subjectHint: s.subjectHint ?? null },
-      create: { id: s.id, name: s.name, homepage: s.homepage, feedUrl: s.feedUrl, region: s.region, kind: s.kind, credibility: s.credibility, subjectHint: s.subjectHint ?? null },
-    });
+  const existing = new Set((await db.source.findMany({ select: { id: true } })).map((s) => s.id));
+  const missing = SOURCES.filter((s) => !existing.has(s.id));
+  if (missing.length) {
+    await db.source.createMany({ data: missing.map((s) => ({ id: s.id, name: s.name, homepage: s.homepage, feedUrl: s.feedUrl, region: s.region, kind: s.kind, credibility: s.credibility, subjectHint: s.subjectHint ?? null })) });
   }
-}
-
-async function uniqueSlug(title: string): Promise<string> {
-  const base = slugify(title);
-  let slug = base;
-  for (let i = 0; i < 20; i++) {
-    const exists = await db.story.findUnique({ where: { slug }, select: { id: true } });
-    if (!exists) return slug;
-    slug = `${base}-${Math.random().toString(36).slice(2, 6)}`;
-  }
-  return `${base}-${Date.now().toString(36)}`;
 }
 
 interface RecentStory {
@@ -122,23 +117,10 @@ interface RecentStory {
   latestPublishedAt: Date;
 }
 
-function titleSimilarity(a: Set<string>, b: Set<string>) {
-  return jaccard(a, b);
-}
-
 async function loadRecentStories(): Promise<RecentStory[]> {
   const since = new Date(Date.now() - 72 * 3_600_000);
-  const rows = await db.story.findMany({
-    where: { latestPublishedAt: { gte: since } },
-    select: { id: true, title: true, keywordsJson: true, latestPublishedAt: true },
-  });
-  return rows.map((r) => ({
-    id: r.id,
-    title: r.title,
-    tokens: new Set(tokenize(r.title)),
-    keywords: new Set(safeJson<string[]>(r.keywordsJson, [])),
-    latestPublishedAt: r.latestPublishedAt,
-  }));
+  const rows = await db.story.findMany({ where: { latestPublishedAt: { gte: since } }, select: { id: true, title: true, keywordsJson: true, latestPublishedAt: true } });
+  return rows.map((r) => ({ id: r.id, title: r.title, tokens: new Set(tokenize(r.title)), keywords: new Set(safeJson<string[]>(r.keywordsJson, [])), latestPublishedAt: r.latestPublishedAt }));
 }
 
 function findCluster(item: FeedItem, recent: RecentStory[]): RecentStory | null {
@@ -148,9 +130,7 @@ function findCluster(item: FeedItem, recent: RecentStory[]): RecentStory | null 
   let bestScore = 0;
   for (const s of recent) {
     if (Math.abs(s.latestPublishedAt.getTime() - item.publishedAt.getTime()) > 60 * 3_600_000) continue;
-    const sim = titleSimilarity(tokens, s.tokens);
-    const kwSim = jaccard(kw, s.keywords);
-    const score = Math.max(sim, kwSim * 0.9);
+    const score = Math.max(jaccard(tokens, s.tokens), jaccard(kw, s.keywords) * 0.9);
     if (score > bestScore) {
       bestScore = score;
       best = s;
@@ -171,94 +151,118 @@ export interface IngestSummary {
 }
 
 let running = false;
+const WRITE_CONCURRENCY = 8;
 
 export async function runIngestion(opts: { cadence?: Cadence; sourceIds?: string[]; enrichLimit?: number } = {}): Promise<IngestSummary> {
   const started = Date.now();
   const cadence = opts.cadence ?? "all";
+  const summary: IngestSummary = { sources: 0, fetched: 0, newArticles: 0, newStories: 0, updatedStories: 0, errors: [], aiEnriched: 0, durationMs: 0 };
   if (running) {
-    return { sources: 0, fetched: 0, newArticles: 0, newStories: 0, updatedStories: 0, errors: [{ source: "pipeline", error: "already running" }], aiEnriched: 0, durationMs: 0 };
+    summary.errors.push({ source: "pipeline", error: "already running" });
+    return summary;
   }
   running = true;
   const job = await db.jobRun.create({ data: { name: `ingest:${cadence}`, status: "running" } });
-  const summary: IngestSummary = { sources: 0, fetched: 0, newArticles: 0, newStories: 0, updatedStories: 0, errors: [], aiEnriched: 0, durationMs: 0 };
   try {
     await ensureSources();
     const sources = SOURCES.filter((s) => (cadence === "all" || s.cadence === cadence) && (!opts.sourceIds || opts.sourceIds.includes(s.id)));
     summary.sources = sources.length;
 
-    const touched = new Set<string>();
     const recent = await loadRecentStories();
+    const slugs = new Set((await db.story.findMany({ select: { slug: true } })).map((s) => s.slug));
+    const touched = new Set<string>();
+    const newStories: Prisma.StoryCreateManyInput[] = [];
+    const newArticles: Prisma.ArticleCreateManyInput[] = [];
+    const sourceStatus: { id: string; ok: boolean; error?: string; count: number }[] = [];
 
-    // Fetch feeds with limited concurrency.
-    const queue = [...sources];
-    const workers = Array.from({ length: 6 }, async () => {
-      while (queue.length) {
-        const src = queue.shift()!;
-        try {
-          const items = await fetchFeed(src);
-          summary.fetched += items.length;
-          const existing = await db.article.findMany({ where: { sourceId: src.id, guid: { in: items.map((i) => i.guid) } }, select: { guid: true } });
-          const seen = new Set(existing.map((e) => e.guid));
-          const fresh = items.filter((i) => !seen.has(i.guid));
-          let itemErrors = 0;
-          for (const item of fresh) {
-            try {
-              const storyId = await attachToStory(item, src, recent, touched);
-              await db.article.create({
-                data: {
-                  sourceId: src.id,
-                  guid: item.guid,
-                  url: item.url,
-                  title: item.title,
-                  description: item.description,
-                  content: item.content || null,
-                  imageUrl: item.imageUrl,
-                  author: item.author,
-                  publishedAt: item.publishedAt,
-                  storyId,
-                },
-              });
-              summary.newArticles++;
-            } catch (e) {
-              itemErrors++;
-              if (itemErrors <= 2) summary.errors.push({ source: src.id, error: `item "${item.title.slice(0, 60)}": ${(e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 400)}` });
-            }
+    const uniqueSlug = (title: string) => {
+      const base = slugify(title);
+      let slug = base;
+      while (slugs.has(slug)) slug = `${base}-${Math.random().toString(36).slice(2, 6)}`;
+      slugs.add(slug);
+      return slug;
+    };
+
+    // 1. Fetch feeds (network-bound, concurrent) and cluster in memory.
+    await pMap(sources, 6, async (src) => {
+      try {
+        const items = await fetchFeed(src);
+        summary.fetched += items.length;
+        const existing = new Set((await db.article.findMany({ where: { sourceId: src.id, guid: { in: items.map((i) => i.guid) } }, select: { guid: true } })).map((e) => e.guid));
+        for (const item of items) {
+          if (existing.has(item.guid)) continue;
+          let storyId: string;
+          const match = findCluster(item, recent);
+          if (match) {
+            storyId = match.id;
+            if (item.publishedAt > match.latestPublishedAt) match.latestPublishedAt = item.publishedAt;
+          } else {
+            storyId = randomUUID();
+            const text = `${item.title}. ${item.description}`;
+            const keywords = extractKeywords(item.title, item.description);
+            newStories.push({
+              id: storyId,
+              slug: uniqueSlug(item.title),
+              title: item.title,
+              summary: item.description,
+              imageUrl: item.imageUrl,
+              subject: classifySubject(text, src.subjectHint ?? null),
+              region: classifyRegion(text, src.region),
+              tier: "discover",
+              score: 0,
+              scoreReason: "Pending scoring",
+              scoreFactors: "[]",
+              sourceCount: 1,
+              firstPublishedAt: item.publishedAt,
+              latestPublishedAt: item.publishedAt,
+              keywordsJson: JSON.stringify(keywords),
+              entitiesJson: JSON.stringify(extractEntities(item.title, item.description)),
+            });
+            recent.push({ id: storyId, title: item.title, tokens: new Set(tokenize(item.title)), keywords: new Set(keywords), latestPublishedAt: item.publishedAt });
           }
-          await db.source.update({ where: { id: src.id }, data: { lastFetchedAt: new Date(), lastStatus: "ok", lastError: null, lastItemCount: items.length } });
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          summary.errors.push({ source: src.id, error: msg.slice(0, 300) });
-          await db.source.update({ where: { id: src.id }, data: { lastFetchedAt: new Date(), lastStatus: "error", lastError: msg.slice(0, 500) } }).catch(() => {});
+          touched.add(storyId);
+          newArticles.push({ sourceId: src.id, guid: item.guid, url: item.url, title: item.title, description: item.description, content: item.content || null, imageUrl: item.imageUrl, author: item.author, publishedAt: item.publishedAt, storyId });
         }
+        sourceStatus.push({ id: src.id, ok: true, count: items.length });
+      } catch (e) {
+        const msg = (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 400);
+        summary.errors.push({ source: src.id, error: msg });
+        sourceStatus.push({ id: src.id, ok: false, error: msg, count: 0 });
       }
     });
-    await Promise.all(workers);
 
-    // Re-derive every touched story from its articles.
-    for (const storyId of touched) {
-      const created = await rebuildStory(storyId);
-      if (created === "new") summary.newStories++;
-      else summary.updatedStories++;
-    }
+    // 2. Bulk insert stories, then articles (a few round-trips in total).
+    for (const part of chunk(newStories, 200)) await db.story.createMany({ data: part });
+    for (const part of chunk(newArticles, 200)) await db.article.createMany({ data: part });
+    summary.newStories = newStories.length;
+    summary.newArticles = newArticles.length;
+    await pMap(sourceStatus, WRITE_CONCURRENCY, (s) => db.source.update({ where: { id: s.id }, data: { lastFetchedAt: new Date(), lastStatus: s.ok ? "ok" : "error", lastError: s.error?.slice(0, 500) ?? null, lastItemCount: s.count } }).catch(() => null));
 
-    // Build links for touched stories.
-    await linkStories(Array.from(touched));
+    // 3. Re-derive touched stories from their articles (one read, parallel writes).
+    const touchedIds = Array.from(touched);
+    summary.updatedStories = Math.max(0, touchedIds.length - newStories.length);
+    await rebuildStories(touchedIds);
 
-    // Freshness decay: rescore everything from the last 4 days.
+    // 4. Links for touched stories, then freshness rescore.
+    await linkStories(touchedIds);
     await rescoreRecent();
 
-    // Optional AI enrichment.
+    // 5. Mark the refresh complete before the (slow) AI enrichment so the UI shows it promptly.
+    summary.durationMs = Date.now() - started;
+    await setSetting("lastRefreshAt", new Date().toISOString());
+    await setSetting("lastRefreshSummary", JSON.stringify(summary));
+    await db.jobRun.update({ where: { id: job.id }, data: { status: summary.errors.length === sources.length && sources.length > 0 ? "error" : "ok", finishedAt: new Date(), details: JSON.stringify(summary) } });
+    clearCache();
+
+    // 6. Optional AI enrichment.
     if (isAiConfigured()) {
       summary.aiEnriched = await enrichQuickReads(opts.enrichLimit ?? 20).catch((e) => {
         summary.errors.push({ source: "ai", error: (e instanceof Error ? e.message : String(e)).slice(0, 300) });
         return 0;
       });
+      clearCache();
     }
-
-    await setSetting("lastRefreshAt", new Date().toISOString());
-    await setSetting("lastRefreshSummary", JSON.stringify({ ...summary, durationMs: Date.now() - started }));
     summary.durationMs = Date.now() - started;
-    await db.jobRun.update({ where: { id: job.id }, data: { status: summary.errors.length === sources.length && sources.length > 0 ? "error" : "ok", finishedAt: new Date(), details: JSON.stringify(summary) } });
     return summary;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -271,130 +275,71 @@ export async function runIngestion(opts: { cadence?: Cadence; sourceIds?: string
   }
 }
 
-async function attachToStory(item: FeedItem, src: SourceDef, recent: RecentStory[], touched: Set<string>): Promise<string> {
-  const match = findCluster(item, recent);
-  if (match) {
-    touched.add(match.id);
-    if (item.publishedAt > match.latestPublishedAt) match.latestPublishedAt = item.publishedAt;
-    return match.id;
+async function rebuildStories(storyIds: string[]) {
+  if (!storyIds.length) return;
+  const stories: Prisma.StoryGetPayload<{ include: { articles: { include: { source: true } } } }>[] = [];
+  for (const ids of chunk(storyIds, 300)) {
+    stories.push(...(await db.story.findMany({ where: { id: { in: ids } }, include: { articles: { include: { source: true }, orderBy: { publishedAt: "desc" } } } })));
   }
-  const text = `${item.title}. ${item.description}`;
-  const subject = classifySubject(text, src.subjectHint ?? null);
-  const region = classifyRegion(text, src.region);
-  const data = {
-      title: item.title,
-      summary: item.description,
-      imageUrl: item.imageUrl,
-      subject,
-      region,
-      tier: "discover",
-      score: 0,
-      scoreReason: "Pending scoring",
-      scoreFactors: "[]",
-      sourceCount: 1,
-      firstPublishedAt: item.publishedAt,
-      latestPublishedAt: item.publishedAt,
-      keywordsJson: JSON.stringify(extractKeywords(item.title, item.description)),
-      entitiesJson: JSON.stringify(extractEntities(item.title, item.description)),
-  };
-  let story: { id: string; title: string; keywordsJson: string | null } | null = null;
-  for (let attempt = 0; attempt < 4 && !story; attempt++) {
-    const slug = attempt === 0 ? await uniqueSlug(item.title) : `${slugify(item.title)}-${Math.random().toString(36).slice(2, 7)}`;
-    try {
-      story = await db.story.create({ data: { slug, ...data }, select: { id: true, title: true, keywordsJson: true } });
-    } catch (e) {
-      const code = (e as { code?: string }).code;
-      if (code !== "P2002") throw e;
-    }
+  const updates: { id: string; data: Prisma.StoryUpdateInput }[] = [];
+  for (const story of stories) {
+    const articles = story.articles;
+    if (!articles.length) continue;
+    const lead = [...articles].sort((a, b) => b.source.credibility - a.source.credibility || b.publishedAt.getTime() - a.publishedAt.getTime())[0];
+    const title = lead.title;
+    const descriptions = Array.from(new Set(articles.map((a) => a.description ?? "").filter(Boolean)));
+    const combined = descriptions.join(" ");
+    const longest = articles.map((a) => a.content ?? "").sort((a, b) => b.length - a.length)[0] ?? "";
+    const text = `${title}. ${combined} ${longest.slice(0, 1500)}`;
+    const sourceIds = new Set(articles.map((a) => a.sourceId));
+    const outlets = Array.from(new Set(articles.map((a) => a.source.name)));
+    const leadDef = SOURCES.find((s) => s.id === lead.sourceId);
+    const subject = classifySubject(text, (leadDef?.subjectHint ?? null) as Subject | null);
+    const region: Region = classifyRegion(text, leadDef?.region ?? "international");
+    const isOpinion = articles.every((a) => looksLikeOpinion(a.title, a.url));
+    const first = articles.reduce((m, a) => (a.publishedAt < m ? a.publishedAt : m), articles[0].publishedAt);
+    const latest = articles.reduce((m, a) => (a.publishedAt > m ? a.publishedAt : m), articles[0].publishedAt);
+    const scoring = scoreStory({ title, text, subject, region, sourceCount: sourceIds.size, maxCredibility: Math.max(...articles.map((a) => a.source.credibility)), hasOfficialSource: articles.some((a) => a.source.kind === "official"), latestPublishedAt: latest, isOpinion });
+    const image = story.imageUrl ?? articles.find((a) => a.imageUrl)?.imageUrl ?? null;
+    const words = wordCount(combined) + wordCount(longest);
+    const existingQuick = safeJson<{ kind?: string } | null>(story.quickReadJson, null);
+    const keepAi = existingQuick?.kind === "ai" && story.title === title;
+    const quick = keepAi ? undefined : buildExtractiveQuickRead({ title, summary: combined || longest, subject, region, sourceNames: outlets, tierReason: scoring.reason });
+    updates.push({
+      id: story.id,
+      data: {
+        title,
+        summary: truncate(combined || longest || title, 900),
+        imageUrl: image,
+        subject,
+        region,
+        tier: scoring.tier,
+        score: scoring.score,
+        scoreReason: scoring.reason,
+        scoreFactors: JSON.stringify(scoring.factors),
+        sourceCount: sourceIds.size,
+        firstPublishedAt: first,
+        latestPublishedAt: latest,
+        keywordsJson: JSON.stringify(extractKeywords(title, text)),
+        entitiesJson: JSON.stringify(extractEntities(title, combined)),
+        quickMinutes: 1,
+        deepMinutes: Math.min(8, Math.max(4, readingMinutes(words) + 3)),
+        ...(quick ? { quickReadJson: JSON.stringify(quick), quickReadKind: "extractive" } : {}),
+      },
+    });
   }
-  if (!story) throw new Error("could not allocate a unique slug");
-  recent.push({ id: story.id, title: story.title, tokens: new Set(tokenize(story.title)), keywords: new Set(safeJson<string[]>(story.keywordsJson, [])), latestPublishedAt: item.publishedAt });
-  touched.add(story.id);
-  return story.id;
-}
-
-async function rebuildStory(storyId: string): Promise<"new" | "updated"> {
-  const story = await db.story.findUnique({
-    where: { id: storyId },
-    include: { articles: { include: { source: true }, orderBy: { publishedAt: "desc" } } },
-  });
-  if (!story || story.articles.length === 0) return "updated";
-  const articles = story.articles;
-  const isNew = story.score === 0 && story.scoreReason === "Pending scoring";
-
-  // Prefer the most credible source's title; keep the earliest publication as event date.
-  const lead = [...articles].sort((a, b) => b.source.credibility - a.source.credibility || b.publishedAt.getTime() - a.publishedAt.getTime())[0];
-  const title = lead.title;
-  const descriptions = Array.from(new Set(articles.map((a) => a.description ?? "").filter(Boolean)));
-  const combined = descriptions.join(" ");
-  const longest = articles.map((a) => a.content ?? "").sort((a, b) => b.length - a.length)[0] ?? "";
-  const text = `${title}. ${combined} ${longest.slice(0, 1500)}`;
-  const sourceIds = new Set(articles.map((a) => a.sourceId));
-  const outlets = Array.from(new Set(articles.map((a) => a.source.name)));
-  const hint = (SOURCES.find((s) => s.id === lead.sourceId)?.subjectHint ?? null) as Subject | null;
-  const subject = classifySubject(text, hint);
-  const region: Region = classifyRegion(text, SOURCES.find((s) => s.id === lead.sourceId)?.region ?? "international");
-  const isOpinion = articles.every((a) => looksLikeOpinion(a.title, a.url));
-  const first = articles.reduce((m, a) => (a.publishedAt < m ? a.publishedAt : m), articles[0].publishedAt);
-  const latest = articles.reduce((m, a) => (a.publishedAt > m ? a.publishedAt : m), articles[0].publishedAt);
-  const scoring = scoreStory({
-    title,
-    text,
-    subject,
-    region,
-    sourceCount: sourceIds.size,
-    maxCredibility: Math.max(...articles.map((a) => a.source.credibility)),
-    hasOfficialSource: articles.some((a) => a.source.kind === "official"),
-    latestPublishedAt: latest,
-    isOpinion,
-  });
-  const image = story.imageUrl ?? articles.find((a) => a.imageUrl)?.imageUrl ?? null;
-  const words = wordCount(combined) + wordCount(longest);
-  const quickMinutes = 1;
-  const deepMinutes = Math.min(8, Math.max(4, readingMinutes(words) + 3));
-  const existingQuick = safeJson<{ kind?: string } | null>(story.quickReadJson, null);
-  const keepAi = existingQuick?.kind === "ai" && story.title === title;
-  const quick = keepAi
-    ? undefined
-    : buildExtractiveQuickRead({ title, summary: combined || longest, subject, region, sourceNames: outlets, tierReason: scoring.reason });
-
-  await db.story.update({
-    where: { id: storyId },
-    data: {
-      title,
-      summary: truncate(combined || longest || title, 900),
-      imageUrl: image,
-      subject,
-      region,
-      tier: scoring.tier,
-      score: scoring.score,
-      scoreReason: scoring.reason,
-      scoreFactors: JSON.stringify(scoring.factors),
-      sourceCount: sourceIds.size,
-      firstPublishedAt: first,
-      latestPublishedAt: latest,
-      keywordsJson: JSON.stringify(extractKeywords(title, text)),
-      entitiesJson: JSON.stringify(extractEntities(title, combined)),
-      quickMinutes,
-      deepMinutes,
-      ...(quick ? { quickReadJson: JSON.stringify(quick), quickReadKind: "extractive" } : {}),
-    },
-  });
-  return isNew ? "new" : "updated";
+  await pMap(updates, WRITE_CONCURRENCY, (u) => db.story.update({ where: { id: u.id }, data: u.data }).catch(() => null));
 }
 
 async function rescoreRecent() {
   const since = new Date(Date.now() - 4 * 86_400_000);
-  const stories = await db.story.findMany({
-    where: { latestPublishedAt: { gte: since } },
-    include: { articles: { include: { source: true } } },
-  });
+  const stories = await db.story.findMany({ where: { latestPublishedAt: { gte: since } }, include: { articles: { select: { sourceId: true, title: true, url: true, source: { select: { credibility: true, kind: true } } } } } });
+  const updates: { id: string; data: Prisma.StoryUpdateInput }[] = [];
   for (const s of stories) {
     if (!s.articles.length) continue;
-    const text = `${s.title}. ${s.summary ?? ""}`;
     const scoring = scoreStory({
       title: s.title,
-      text,
+      text: `${s.title}. ${s.summary ?? ""}`,
       subject: s.subject as Subject,
       region: s.region as Region,
       sourceCount: new Set(s.articles.map((a) => a.sourceId)).size,
@@ -403,20 +348,27 @@ async function rescoreRecent() {
       latestPublishedAt: s.latestPublishedAt,
       isOpinion: s.articles.every((a) => looksLikeOpinion(a.title, a.url)),
     });
-    if (scoring.tier !== s.tier || Math.abs(scoring.score - s.score) > 0.5) {
-      await db.story.update({ where: { id: s.id }, data: { score: scoring.score, tier: scoring.tier, scoreReason: scoring.reason, scoreFactors: JSON.stringify(scoring.factors) } });
+    // Only write when it changes what the reader sees.
+    if (scoring.tier !== s.tier || Math.abs(scoring.score - s.score) >= 3) {
+      updates.push({ id: s.id, data: { score: scoring.score, tier: scoring.tier, scoreReason: scoring.reason, scoreFactors: JSON.stringify(scoring.factors) } });
     }
   }
+  await pMap(updates, WRITE_CONCURRENCY, (u) => db.story.update({ where: { id: u.id }, data: u.data }).catch(() => null));
 }
 
 export async function linkStories(storyIds: string[]) {
   if (!storyIds.length) return;
   const since = new Date(Date.now() - 7 * 86_400_000);
-  const pool = await db.story.findMany({
-    where: { latestPublishedAt: { gte: since } },
-    select: { id: true, entitiesJson: true, keywordsJson: true, subject: true, score: true },
-  });
-  const byId = new Map(pool.map((p) => [p.id, { ...p, entities: safeJson<string[]>(p.entitiesJson, []), keywords: new Set(safeJson<string[]>(p.keywordsJson, [])) }]));
+  const pool = await db.story.findMany({ where: { latestPublishedAt: { gte: since } }, select: { id: true, entitiesJson: true, keywordsJson: true } });
+  const byId = new Map(pool.map((p) => [p.id, { id: p.id, entities: safeJson<string[]>(p.entitiesJson, []), keywords: new Set(safeJson<string[]>(p.keywordsJson, [])) }]));
+  const touched = new Set(storyIds);
+
+  // Existing AI-classified links are kept; topical ones for touched stories are recomputed.
+  const existing = await db.storyLink.findMany({ where: { OR: [{ fromId: { in: storyIds } }, { toId: { in: storyIds } }] }, select: { fromId: true, toId: true, relation: true } });
+  const keep = new Set(existing.filter((l) => l.relation !== "topical").map((l) => `${l.fromId}|${l.toId}`));
+  await db.storyLink.deleteMany({ where: { relation: "topical", OR: [{ fromId: { in: storyIds } }, { toId: { in: storyIds } }] } });
+
+  const rows = new Map<string, Prisma.StoryLinkCreateManyInput>();
   for (const id of storyIds) {
     const me = byId.get(id);
     if (!me) continue;
@@ -424,33 +376,33 @@ export async function linkStories(storyIds: string[]) {
     for (const other of byId.values()) {
       if (other.id === id) continue;
       const shared = sharedEntities(me.entities, other.entities);
-      const kw = jaccard(me.keywords, other.keywords);
-      const strength = shared.length * 1.0 + kw * 3;
-      if (shared.length >= 1 && strength >= 1.6) candidates.push({ toId: other.id, shared, strength: Number(strength.toFixed(2)) });
+      if (!shared.length) continue;
+      const strength = shared.length + jaccard(me.keywords, other.keywords) * 3;
+      if (strength >= 1.6) candidates.push({ toId: other.id, shared, strength: Number(strength.toFixed(2)) });
     }
     candidates.sort((a, b) => b.strength - a.strength);
-    const top = candidates.slice(0, 8);
-    await db.storyLink.deleteMany({ where: { OR: [{ fromId: id }, { toId: id }] , relation: "topical" } });
-    for (const c of top) {
-      const data = { shared: JSON.stringify(c.shared), strength: c.strength, relation: "topical" as const };
-      await db.storyLink.upsert({ where: { fromId_toId: { fromId: id, toId: c.toId } }, update: data, create: { fromId: id, toId: c.toId, ...data } });
-      await db.storyLink.upsert({ where: { fromId_toId: { fromId: c.toId, toId: id } }, update: data, create: { fromId: c.toId, toId: id, ...data } });
+    for (const c of candidates.slice(0, 8)) {
+      for (const [from, to] of [[id, c.toId], [c.toId, id]] as const) {
+        const key = `${from}|${to}`;
+        if (keep.has(key) || rows.has(key)) continue;
+        // Links from an untouched story to a touched one were deleted above too; recreate them.
+        if (!touched.has(from) && !touched.has(to)) continue;
+        rows.set(key, { fromId: from, toId: to, shared: JSON.stringify(c.shared), strength: c.strength, relation: "topical" });
+      }
     }
   }
+  for (const part of chunk(Array.from(rows.values()), 300)) await db.storyLink.createMany({ data: part });
 }
 
 export async function pruneOld(days = 45) {
   const cutoff = new Date(Date.now() - days * 86_400_000);
-  // Keep stories that users saved or reflected on.
-  const keep = await db.story.findMany({
-    where: { latestPublishedAt: { lt: cutoff }, OR: [{ bookmarks: { some: {} } }, { reflections: { some: {} } }, { readingEvents: { some: {} } }] },
-    select: { id: true },
-  });
+  const keep = await db.story.findMany({ where: { latestPublishedAt: { lt: cutoff }, OR: [{ bookmarks: { some: {} } }, { reflections: { some: {} } }, { readingEvents: { some: {} } }] }, select: { id: true } });
   const keepIds = new Set(keep.map((k) => k.id));
   const old = await db.story.findMany({ where: { latestPublishedAt: { lt: cutoff } }, select: { id: true } });
   const ids = old.map((o) => o.id).filter((i) => !keepIds.has(i));
   if (!ids.length) return 0;
   await db.article.deleteMany({ where: { storyId: { in: ids } } });
   await db.story.deleteMany({ where: { id: { in: ids } } });
+  clearCache();
   return ids.length;
 }
