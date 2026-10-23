@@ -6,7 +6,7 @@ import { Magnifier, Nodes, Lightbulb } from "@/components/doodles";
 import { SUBJECTS } from "@/lib/taxonomy";
 import { searchStories } from "@/lib/search";
 import { currentUser } from "@/lib/auth";
-import { db } from "@/lib/db";
+import { db, ci } from "@/lib/db";
 import { cn, fmtShortDate, safeJson, timeAgo } from "@/lib/utils";
 import { fmtValue } from "@/components/home/Sections";
 import { isAiConfigured } from "@/lib/ai/client";
@@ -29,10 +29,10 @@ export default async function ExplorePage({ searchParams }: { searchParams: Prom
   const hits = q ? await searchStories({ q, limit: 40, subject: sp.subject || undefined, region: sp.region || undefined, tier: sp.tier || undefined, days, maxMinutes: Number(sp.maxmin) || undefined }) : [];
   const [indicators, saved, notes, deepDives] = q
     ? await Promise.all([
-        db.indicator.findMany({ where: { latestValue: { not: null }, OR: q.split(/\s+/).filter((t) => t.length > 2).map((t) => ({ name: { contains: t } })) } , take: 4 }),
-        user ? db.bookmark.findMany({ where: { userId: user.id, story: { OR: [{ title: { contains: q } }, { summary: { contains: q } }] } }, include: { story: { select: { slug: true, title: true } } }, take: 5 }) : [],
-        user ? db.reflection.findMany({ where: { userId: user.id, OR: [{ title: { contains: q } }, { meaning: { contains: q } }, { freeform: { contains: q } }] }, select: { id: true, title: true }, take: 5 }) : [],
-        db.story.findMany({ where: { deepDiveKind: "ai", OR: [{ title: { contains: q } }, { summary: { contains: q } }] }, select: { slug: true, title: true }, take: 4 }),
+        db.indicator.findMany({ where: { latestValue: { not: null }, OR: q.split(/\s+/).filter((t) => t.length > 2).map((t) => ({ name: { contains: t, ...ci } })) } , take: 4 }),
+        user ? db.bookmark.findMany({ where: { userId: user.id, story: { OR: [{ title: { contains: q, ...ci } }, { summary: { contains: q, ...ci } }] } }, include: { story: { select: { slug: true, title: true } } }, take: 5 }) : [],
+        user ? db.reflection.findMany({ where: { userId: user.id, OR: [{ title: { contains: q, ...ci } }, { meaning: { contains: q, ...ci } }, { freeform: { contains: q, ...ci } }] }, select: { id: true, title: true }, take: 5 }) : [],
+        db.story.findMany({ where: { deepDiveKind: "ai", OR: [{ title: { contains: q, ...ci } }, { summary: { contains: q, ...ci } }] }, select: { slug: true, title: true }, take: 4 }),
       ])
     : [[], [], [], []];
 

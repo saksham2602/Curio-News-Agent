@@ -18,3 +18,7 @@ export async function getSetting(key: string): Promise<string | null> {
 export async function setSetting(key: string, value: string): Promise<void> {
   await db.setting.upsert({ where: { key }, update: { value }, create: { key, value } });
 }
+
+// Postgres `contains` is case-sensitive; SQLite's is not. Spread this into string filters.
+export const IS_POSTGRES = /^postgres(ql)?:/i.test(process.env.DATABASE_URL ?? "");
+export const ci: Record<string, unknown> = IS_POSTGRES ? { mode: "insensitive" } : {};

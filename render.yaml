@@ -1,0 +1,26 @@
+# Render blueprint — https://render.com/docs/blueprint-spec
+# Deploy: Render dashboard → New → Blueprint → pick this repo. Fill the secret env vars when prompted.
+services:
+  - type: web
+    name: curious-brief
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start
+    healthCheckPath: /api/status
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: DATABASE_URL
+        sync: false   # Supabase/Neon Postgres connection string (session pooler, port 5432)
+      - key: AUTH_SECRET
+        generateValue: true
+      - key: NVIDIA_API_KEY
+        sync: false
+      - key: NVIDIA_MODEL
+        value: nvidia/nemotron-3-ultra-550b-a55b
+      - key: NVIDIA_BASE_URL
+        value: https://integrate.api.nvidia.com/v1
+      - key: IN_PROCESS_SCHEDULER
+        value: "true"

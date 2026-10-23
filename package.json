@@ -4,16 +4,16 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "prisma generate && next build",
-    "start": "prisma db push --skip-generate && next start -p ${PORT:-3000}",
+    "build": "node scripts/prisma.js generate && next build",
+    "start": "node scripts/prisma.js db push --skip-generate && next start -p ${PORT:-3000}",
     "lint": "next lint",
-    "db:push": "prisma db push",
-    "db:studio": "prisma studio",
+    "db:push": "node scripts/prisma.js db push",
+    "db:studio": "node scripts/prisma.js studio",
     "ingest": "tsx scripts/ingest.ts",
-    "postinstall": "prisma generate",
+    "postinstall": "node scripts/prisma.js generate",
     "ai:check": "tsx scripts/ai-check.ts",
     "ai:check:full": "tsx scripts/ai-check.ts --full",
-    "start:windows": "prisma db push --skip-generate && next start"
+    "start:windows": "node scripts/prisma.js db push --skip-generate && next start"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.137.0",

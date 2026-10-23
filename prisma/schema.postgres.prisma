@@ -1,0 +1,254 @@
+// The Curious Brief — data model (PostgreSQL variant, used automatically when DATABASE_URL starts with postgres).
+// Keep in sync with schema.prisma; only the datasource provider differs.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ───────────────────────── Ingestion ─────────────────────────
+
+model Source {
+  id            String    @id
+  name          String
+  homepage      String
+  feedUrl       String
+  region        String    // "india" | "international"
+  kind          String    // "news" | "official" | "analysis"
+  credibility   Float     // 0..1 editorial weight
+  subjectHint   String?   // default subject for this feed
+  enabled       Boolean   @default(true)
+  lastFetchedAt DateTime?
+  lastStatus    String?   // "ok" | "error"
+  lastError     String?
+  lastItemCount Int       @default(0)
+  articles      Article[]
+}
+
+model Article {
+  id          String   @id @default(cuid())
+  sourceId    String
+  source      Source   @relation(fields: [sourceId], references: [id])
+  guid        String
+  url         String
+  title       String
+  description String?
+  content     String?
+  imageUrl    String?
+  author      String?
+  publishedAt DateTime
+  fetchedAt   DateTime @default(now())
+  storyId     String?
+  story       Story?   @relation(fields: [storyId], references: [id])
+
+  @@unique([sourceId, guid])
+  @@index([publishedAt])
+  @@index([storyId])
+}
+
+// A Story is a cluster of one or more articles about the same development.
+model Story {
+  id                  String    @id @default(cuid())
+  slug                String    @unique
+  title               String
+  summary             String?
+  imageUrl            String?
+  subject             String    // economy | business | markets | marketing | geopolitics | politics | society | science | health | environment | technology
+  region              String    // india | international | cross-border
+  tier                String    // must-know | worth-understanding | discover
+  score               Float
+  scoreReason         String    // human-readable "why this is prioritised"
+  scoreFactors        String    // JSON array of factor labels
+  sourceCount         Int       @default(1)
+  firstPublishedAt    DateTime
+  latestPublishedAt   DateTime
+  quickReadJson       String?   // QuickRead
+  quickReadKind       String?   // "ai" | "extractive"
+  deepDiveJson        String?   // DeepDive
+  deepDiveKind        String?   // "ai" | "unavailable"
+  deepDiveRequestedAt DateTime?
+  entitiesJson        String?   // string[] of entities / key phrases
+  keywordsJson        String?   // string[]
+  quickMinutes        Int       @default(1)
+  deepMinutes         Int       @default(5)
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  articles            Article[]
+  bookmarks           Bookmark[]
+  readingEvents       ReadingEvent[]
+  reflections         Reflection[]
+  linksFrom           StoryLink[] @relation("from")
+  linksTo             StoryLink[] @relation("to")
+
+  @@index([latestPublishedAt])
+  @@index([subject])
+  @@index([tier])
+  @@index([score])
+}
+
+model StoryLink {
+  id        String   @id @default(cuid())
+  fromId    String
+  toId      String
+  from      Story    @relation("from", fields: [fromId], references: [id], onDelete: Cascade)
+  to        Story    @relation("to", fields: [toId], references: [id], onDelete: Cascade)
+  shared    String   // JSON string[] of shared entities
+  strength  Float
+  relation  String   @default("topical") // topical | causal | correlated | plausible | speculative
+  rationale String?
+  createdAt DateTime @default(now())
+
+  @@unique([fromId, toId])
+  @@index([fromId])
+  @@index([toId])
+}
+
+// ───────────────────────── Users ─────────────────────────
+
+model User {
+  id            String    @id @default(cuid())
+  email         String?   @unique
+  passwordHash  String?
+  name          String?
+  isGuest       Boolean   @default(true)
+  onboarded     Boolean   @default(false)
+  preferences   String    @default("{}") // JSON Preferences
+  createdAt     DateTime  @default(now())
+  lastSeenAt    DateTime  @default(now())
+  bookmarks     Bookmark[]
+  readingEvents ReadingEvent[]
+  reflections   Reflection[]
+  curioMessages CurioMessage[]
+  highlights    Highlight[]
+}
+
+model Bookmark {
+  id         String   @id @default(cuid())
+  userId     String
+  storyId    String
+  collection String   @default("Saved")
+  note       String?
+  createdAt  DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  story      Story    @relation(fields: [storyId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, storyId])
+  @@index([userId])
+}
+
+model Highlight {
+  id        String   @id @default(cuid())
+  userId    String
+  storyId   String
+  text      String
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model ReadingEvent {
+  id        String   @id @default(cuid())
+  userId    String
+  storyId   String
+  mode      String   // quick | deep
+  progress  Float    @default(0) // 0..1 scroll position
+  completed Boolean  @default(false)
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  story     Story    @relation(fields: [storyId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, storyId, mode])
+  @@index([userId, updatedAt])
+}
+
+model Reflection {
+  id         String   @id @default(cuid())
+  userId     String
+  storyId    String?
+  title      String
+  happened   String   @default("")
+  meaning    String   @default("")
+  evidence   String   @default("")
+  missing    String   @default("")
+  changeMind String   @default("")
+  freeform   String   @default("")
+  aiReview   String?  // JSON PerspectiveReview
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  story      Story?   @relation(fields: [storyId], references: [id], onDelete: SetNull)
+
+  @@index([userId, updatedAt])
+}
+
+model CurioMessage {
+  id        String   @id @default(cuid())
+  userId    String
+  sessionId String
+  role      String   // user | assistant
+  content   String
+  storyId   String?
+  citations String?  // JSON
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, sessionId, createdAt])
+}
+
+// ───────────────────────── Economic data ─────────────────────────
+
+model Indicator {
+  code            String    @id
+  name            String
+  region          String    // india | global
+  unit            String
+  frequency       String    // annual | monthly | daily
+  provider        String    // worldbank | ecb | fred
+  sourceName      String
+  sourceUrl       String
+  explanation     String
+  whyItMatters    String
+  seriesJson      String    // [{period, value}]
+  latestValue     Float?
+  latestPeriod    String?
+  previousValue   Float?
+  previousPeriod  String?
+  sourceUpdatedAt String?
+  valueKind       String    @default("actual") // actual | estimate | forecast | reference-rate
+  fetchedAt       DateTime?
+  lastError       String?
+  order           Int       @default(0)
+}
+
+// ───────────────────────── Digests & jobs ─────────────────────────
+
+model WeeklyDigest {
+  weekKey     String   @id // e.g. 2026-W42
+  startAt     DateTime
+  endAt       DateTime
+  contentJson String
+  kind        String   // ai | compiled
+  createdAt   DateTime @default(now())
+}
+
+model JobRun {
+  id         String    @id @default(cuid())
+  name       String
+  status     String    // running | ok | error
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+  details    String?
+
+  @@index([name, startedAt])
+}
+
+model Setting {
+  key   String @id
+  value String
+}

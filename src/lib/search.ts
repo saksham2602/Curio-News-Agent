@@ -1,4 +1,4 @@
-import { db } from "./db";
+import { db, ci } from "./db";
 import { tokenize } from "./ingest/entities";
 import type { Prisma } from "@prisma/client";
 
@@ -41,7 +41,7 @@ export async function searchStories(opts: SearchOptions): Promise<SearchHit[]> {
   if (!terms.length) return [];
   const where: Prisma.StoryWhereInput = {
     AND: [
-      { OR: terms.map((t) => ({ OR: [{ title: { contains: t } }, { summary: { contains: t } }, { entitiesJson: { contains: t } }] })) },
+      { OR: terms.map((t) => ({ OR: [{ title: { contains: t, ...ci } }, { summary: { contains: t, ...ci } }, { entitiesJson: { contains: t, ...ci } }] })) },
       opts.subject ? { subject: opts.subject } : {},
       opts.region ? { region: opts.region } : {},
       opts.tier ? { tier: opts.tier } : {},
