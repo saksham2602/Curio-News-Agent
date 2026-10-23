@@ -1,0 +1,14 @@
+node_modules
+.next
+out
+*.db
+*.db-journal
+.env
+.env.local
+.DS_Store
+npm-debug.log*
+tsconfig.tsbuildinfo
+next-env.d.ts
+design-reference/
+test-shots/
+.next-build
