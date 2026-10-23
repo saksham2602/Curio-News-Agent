@@ -35,7 +35,7 @@ export const SOURCES: SourceDef[] = [
   // ───────────── India: official ─────────────
   { id: "rbi-press", name: "Reserve Bank of India", homepage: "https://www.rbi.org.in", feedUrl: "https://www.rbi.org.in/pressreleases_rss.xml", region: "india", kind: "official", credibility: 1, subjectHint: "economy", cadence: "breaking" },
   { id: "rbi-notifications", name: "Reserve Bank of India", homepage: "https://www.rbi.org.in", feedUrl: "https://www.rbi.org.in/notifications_rss.xml", region: "india", kind: "official", credibility: 1, subjectHint: "economy", cadence: "general" },
-  { id: "pib", name: "Press Information Bureau", homepage: "https://www.pib.gov.in", feedUrl: "https://www.pib.gov.in/RssMain.aspx?ModId=6&Lang=1&Regid=3", region: "india", kind: "official", credibility: 0.95, subjectHint: "politics", cadence: "general" },
+  { id: "pib", name: "Press Information Bureau", homepage: "https://www.pib.gov.in", feedUrl: "https://www.pib.gov.in/RssMain.aspx?ModId=6&Lang=1&Regid=3&reg=3", region: "india", kind: "official", credibility: 0.95, subjectHint: "politics", cadence: "general" },
   { id: "sebi", name: "SEBI", homepage: "https://www.sebi.gov.in", feedUrl: "https://www.sebi.gov.in/sebirss.xml", region: "india", kind: "official", credibility: 1, subjectHint: "markets", cadence: "general" },
 
   // ───────────── International: news ─────────────

@@ -22,7 +22,7 @@ export function BigPicture({ stories, state, total }: { stories: StoryCardData[]
         title="The five most consequential developments"
         description="Chosen for significance — corroboration, scale, policy and economic consequence, relevance to India — not for clicks or genre."
         doodle={<Magnifier className="h-12 w-12" />}
-        action={{ href: "/news", label: `${Math.max(0, total - stories.length)} more major stories` }}
+        action={{ href: "/news", label: total - stories.length > 0 ? `${total - stories.length} more major stories` : "All news" }}
       />
       <div className="mt-6 space-y-5">
         <StoryCard story={lead} variant="hero" bookmarked={state.bookmarked.has(lead.id)} read={state.read.has(lead.id)} priority />

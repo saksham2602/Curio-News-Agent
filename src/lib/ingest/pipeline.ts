@@ -78,6 +78,9 @@ async function fetchFeed(src: SourceDef): Promise<FeedItem[]> {
     const url = (item.link ?? "").toString().trim();
     const title = stripHtml((item.title ?? "").toString()).trim();
     if (!url || !title || !/^https?:/.test(url)) continue;
+    // English-language platform: skip items whose title is mostly non-Latin script (e.g. Hindi editions of a feed).
+    const letters = title.replace(/[^\p{L}]/gu, "");
+    if (letters.length && (letters.match(/[\p{Script=Latin}]/gu)?.length ?? 0) / letters.length < 0.6) continue;
     const guid = ((item.guid as string | undefined) ?? url).toString().trim().slice(0, 400);
     if (seen.has(guid)) continue;
     seen.add(guid);
@@ -102,11 +105,14 @@ async function fetchFeed(src: SourceDef): Promise<FeedItem[]> {
 }
 
 async function ensureSources() {
-  const existing = new Set((await db.source.findMany({ select: { id: true } })).map((s) => s.id));
+  const existing = new Map((await db.source.findMany({ select: { id: true, feedUrl: true, credibility: true, name: true } })).map((s) => [s.id, s]));
   const missing = SOURCES.filter((s) => !existing.has(s.id));
   if (missing.length) {
     await db.source.createMany({ data: missing.map((s) => ({ id: s.id, name: s.name, homepage: s.homepage, feedUrl: s.feedUrl, region: s.region, kind: s.kind, credibility: s.credibility, subjectHint: s.subjectHint ?? null })) });
   }
+  // Keep catalogue edits (feed URL, weight, name) in sync with existing rows.
+  const changed = SOURCES.filter((s) => { const e = existing.get(s.id); return e && (e.feedUrl !== s.feedUrl || e.credibility !== s.credibility || e.name !== s.name); });
+  await pMap(changed, WRITE_CONCURRENCY, (s) => db.source.update({ where: { id: s.id }, data: { feedUrl: s.feedUrl, credibility: s.credibility, name: s.name, homepage: s.homepage, kind: s.kind, region: s.region, subjectHint: s.subjectHint ?? null } }));
 }
 
 interface RecentStory {
