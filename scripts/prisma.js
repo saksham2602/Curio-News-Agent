@@ -16,8 +16,19 @@ if (fs.existsSync(envPath)) {
   }
 }
 const url = process.env.DATABASE_URL || "file:./dev.db";
-const schema = /^postgres(ql)?:/i.test(url) ? "prisma/schema.postgres.prisma" : "prisma/schema.prisma";
-const args = [...process.argv.slice(2), `--schema=${schema}`];
+const isPostgres = /^postgres(ql)?:/i.test(url);
+const schema = isPostgres ? "prisma/schema.postgres.prisma" : "prisma/schema.prisma";
+const cliArgs = process.argv.slice(2);
+
+// Schema changes (db push / migrate) must not go through a transaction-mode pooler
+// (Supabase port 6543, `?pgbouncer=true`): Prisma hangs there. Use DIRECT_URL if given,
+// otherwise rewrite the pooled URL to the session pooler (port 5432) for this command only.
+if (isPostgres && /^(db|migrate)$/.test(cliArgs[0] ?? "")) {
+  const direct = process.env.DIRECT_URL || url.replace(/:6543\//, ":5432/").replace(/[?&]pgbouncer=true/i, "").replace(/\?$/, "");
+  if (direct !== url) console.log("[prisma] using direct (session) connection for schema changes");
+  process.env.DATABASE_URL = direct;
+}
+const args = [...cliArgs, `--schema=${schema}`];
 console.log(`[prisma] ${args.join(" ")}`);
 const r = spawnSync(process.platform === "win32" ? "npx.cmd" : "npx", ["prisma", ...args], { stdio: "inherit", shell: process.platform === "win32" });
 process.exit(r.status ?? 1);
