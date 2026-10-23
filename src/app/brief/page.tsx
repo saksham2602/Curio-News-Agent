@@ -38,7 +38,7 @@ export default async function BriefPage({ searchParams }: { searchParams: Promis
 
         <div className="card mt-8 p-5 sm:p-7">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="no-scrollbar flex gap-2 overflow-x-auto">
+            <div className="no-scrollbar flex min-w-0 max-w-full gap-2 overflow-x-auto">
               {BUDGETS.map((b) => (
                 <Link key={b.v} href={`/brief?budget=${b.v}`} className={cn("pill border", budget === b.v ? "border-ink bg-ink text-paper" : "border-line bg-card hover:border-ink/40")}>
                   {b.label}

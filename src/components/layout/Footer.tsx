@@ -18,7 +18,7 @@ export function Footer() {
         <FooterCol title="Understand" links={[["/connect", "Connect the Dots"], ["/pulse", "Economic Pulse"], ["/curio", "Ask Curio"], ["/explore", "Search & Explore"]]} />
         <FooterCol title="Yours" links={[["/library", "My Little Library"], ["/perspectives", "My Perspectives"], ["/settings", "Settings"], ["/sources", "Source Health"]]} />
       </div>
-      <div className="border-t border-line/60 py-4 text-center text-xs text-muted">Built for curious minds. Headlines and summaries belong to their publishers.</div>
+      <div className="border-t border-line/60 py-4 pb-24 text-center text-xs text-muted sm:pb-4">Built for curious minds. Headlines and summaries belong to their publishers.</div>
     </footer>
   );
 }

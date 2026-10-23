@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { ChevronDown, Menu, Moon, Search, Sun, X } from "lucide-react";
 import { GlobeNewspaper } from "@/components/doodles";
 import { cn } from "@/lib/utils";
@@ -45,10 +46,12 @@ function useTheme() {
 export function Nav({ user }: { user: { name: string | null; email: string | null; isGuest: boolean } | null }) {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
+  const [mounted, setMounted] = useState(false);
   const [more, setMore] = useState(false);
   const moreRef = useRef<HTMLDivElement>(null);
   const { dark, toggle } = useTheme();
 
+  useEffect(() => setMounted(true), []);
   useEffect(() => setOpen(false), [pathname]);
   useEffect(() => {
     const onClick = (e: MouseEvent) => {
@@ -124,8 +127,8 @@ export function Nav({ user }: { user: { name: string | null; email: string | nul
         </div>
       </div>
 
-      {/* Mobile drawer */}
-      {open && (
+      {/* Mobile drawer — portalled to <body>: the header's backdrop-blur would otherwise trap `fixed` positioning (Safari). */}
+      {open && mounted && createPortal(
         <div className="fixed inset-0 z-[60] xl:hidden" role="dialog" aria-modal="true" aria-label="Menu">
           <div className="absolute inset-0 bg-ink/40" onClick={() => setOpen(false)} />
           <div className="absolute inset-y-0 right-0 flex w-[min(88vw,360px)] flex-col bg-paper shadow-pop animate-fadeUp">
@@ -158,7 +161,8 @@ export function Nav({ user }: { user: { name: string | null; email: string | nul
               )}
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </header>
   );

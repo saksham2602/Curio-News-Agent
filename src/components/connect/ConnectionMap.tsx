@@ -81,7 +81,7 @@ export function ConnectionMap({ origin, nodes, aiConfigured, hasUnclassified }: 
     <div className="grid gap-5 lg:grid-cols-[1.3fr_1fr]">
       <div className="card p-3 sm:p-5">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="inline-flex rounded-full border border-line p-0.5">
+          <div className="inline-flex max-w-full flex-wrap gap-0.5 rounded-3xl border border-line p-0.5">
             <button type="button" onClick={() => setView("map")} className={cn("pill", view === "map" ? "bg-ink text-paper" : "hover:bg-line/60")}>
               <MapIcon className="h-3.5 w-3.5" /> Visual map
             </button>

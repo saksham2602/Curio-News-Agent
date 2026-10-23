@@ -56,7 +56,7 @@ export default async function ExplorePage({ searchParams }: { searchParams: Prom
 
       {q ? (
         <>
-          <div className="mt-5 inline-flex rounded-full border border-line p-0.5">
+          <div className="mt-5 inline-flex max-w-full flex-wrap gap-0.5 rounded-3xl border border-line p-0.5">
             {[["latest", "Latest News"], ["topic", "Understand the Topic"], ["connections", "Explore Connections"]].map(([m, label]) => (
               <Link key={m} href={modeHref(m)} className={cn("pill", mode === m ? "bg-ink text-paper" : "hover:bg-line/60")}>
                 {label}
